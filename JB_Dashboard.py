@@ -3,7 +3,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
-import numpy as np # [추가] 수치 해석 및 시뮬레이션용
+import numpy as np 
 from datetime import datetime, timedelta
 import time
 
@@ -14,13 +14,30 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- CSS 스타일링 ---
+# --- CSS 스타일링 (스텔스 모드 적용: Streamlit 티 안 나게 하기) ---
 st.markdown("""
     <style>
+        /* 1. 전체 배경 및 폰트 설정 */
         .stApp {
             background-color: #0e1117;
             color: #fafafa;
         }
+        
+        /* 2. Streamlit 기본 UI 요소 숨기기 (스텔스 모드) */
+        #MainMenu {visibility: hidden;} /* 우측 상단 햄버거 메뉴 숨김 */
+        header {visibility: hidden;}    /* 상단 헤더 숨김 */
+        footer {visibility: hidden;}    /* 하단 'Made with Streamlit' 숨김 */
+        .stDeployButton {display:none;} /* 배포 버튼 숨김 */
+        [data-testid="stToolbar"] {visibility: hidden;} /* 우측 상단 툴바 숨김 */
+        [data-testid="stDecoration"] {display:none;} /* 상단 데코레이션 바 숨김 */
+
+        /* 3. 콘텐츠 영역 상단 여백 제거 (헤더가 사라진 자리 메우기) */
+        .block-container {
+            padding-top: 1rem !important; 
+            padding-bottom: 0rem !important;
+        }
+
+        /* 4. 커스텀 스타일링 */
         [data-testid="stMetricLabel"] {
             font-size: 14px;
             color: #b0b0b0;
@@ -46,7 +63,7 @@ st.markdown("""
         .quant-header {
             font-size: 1.5rem;
             font-weight: bold;
-            color: #fafafa; /* 흰색으로 변경 */
+            color: #fafafa;
             margin-top: 2rem;
             margin-bottom: 1rem;
             border-bottom: 1px solid #444;
@@ -72,7 +89,6 @@ def add_technical_indicators(df):
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     
     # 2. 볼린저 밴드 (Bollinger Bands)
-    # 표준편차
     df['STD_20'] = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['SMA_20'] + (df['STD_20'] * 2)
     df['Lower_Band'] = df['SMA_20'] - (df['STD_20'] * 2)
@@ -91,16 +107,13 @@ def run_monte_carlo(df, simulations=50, days=30):
     if df.empty:
         return None
     
-    # 로그 수익률 계산
     log_returns = np.log(1 + df['Close'].pct_change())
     
-    # 드리프트(Drift)와 변동성(Variance) 계산
     u = log_returns.mean()
     var = log_returns.var()
     drift = u - (0.5 * var)
     stdev = log_returns.std()
     
-    # 예측 데이터 생성
     last_price = df['Close'].iloc[-1]
     prediction_dates = [df.index[-1] + timedelta(days=x) for x in range(1, days+1)]
     
@@ -108,9 +121,7 @@ def run_monte_carlo(df, simulations=50, days=30):
     simulation_df['Date'] = prediction_dates
     simulation_df.set_index('Date', inplace=True)
     
-    # 난수 생성 및 시뮬레이션 반복
     for i in range(simulations):
-        # 정규분포를 따르는 난수 Z 생성
         Z = np.random.normal(0, 1, days)
         daily_returns = np.exp(drift + stdev * Z)
         
@@ -175,7 +186,6 @@ def draw_chart(df, ticker_id, is_flat=False, show_tech=False):
 
     # 2. [Technical] 기술적 지표 추가
     if show_tech and 'SMA_20' in df.columns:
-        # 볼린저 밴드 (영역 채우기)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Upper_Band'], line=dict(color='rgba(255, 255, 255, 0)'),
             showlegend=False, hoverinfo='skip'
@@ -185,7 +195,6 @@ def draw_chart(df, ticker_id, is_flat=False, show_tech=False):
             fillcolor='rgba(108, 92, 231, 0.1)', line=dict(color='rgba(255, 255, 255, 0)'),
             name='Bollinger Band', hoverinfo='skip'
         ))
-        # SMA 20
         fig.add_trace(go.Scatter(
             x=df.index, y=df['SMA_20'], line=dict(color='#f1c40f', width=1), name='SMA 20'
         ))
@@ -224,7 +233,6 @@ def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}
 
         price, delta, df, is_flat = process_ticker_data(ticker_df, is_jpy)
         
-        # 기술적 지표 계산
         if show_tech and not df.empty:
             df = add_technical_indicators(df)
 
@@ -280,7 +288,7 @@ def main():
 
     show_charts = not simple_mode
 
-    # [Quant 옵션] 사이드바 설정 - 모든 옵션 True로 설정
+    # [Quant 옵션] 사이드바 설정 - 모든 옵션 True
     st.sidebar.header("Quant Lab Settings")
     show_tech = st.sidebar.checkbox("기술적 지표 (Bollinger/SMA)", value=True, help="차트에 볼린저 밴드와 이동평균선을 오버레이합니다.")
     show_heatmap = st.sidebar.checkbox("자산 상관관계 (Heatmap)", value=True, help="자산 간의 가격 움직임 상관계수를 분석합니다.")
@@ -312,19 +320,17 @@ def main():
     if not simple_mode and (show_heatmap or show_monte):
         st.markdown("<div class='quant-header'>Quant Lab (Advanced Analysis)</div>", unsafe_allow_html=True)
         
-        # 데이터프레임 재구조화 (Pivot for Correlation)
         close_df = pd.DataFrame()
         for t_name, t_code in {**indices, **currencies, **cryptos}.items():
             try:
                 if isinstance(batch_data.columns, pd.MultiIndex):
                     series = batch_data[t_code]['Close']
                 else:
-                    series = batch_data['Close'] # 단일 티커일 경우
+                    series = batch_data['Close']
                 close_df[t_name] = series
             except:
                 pass
         
-        # 결측치 보간 (상관분석을 위해)
         close_df = close_df.fillna(method='ffill').fillna(method='bfill')
 
         q_col1, q_col2 = st.columns([1, 1])
@@ -338,14 +344,13 @@ def main():
                 fig_corr.update_layout(template="plotly_dark", height=400)
                 st.plotly_chart(fig_corr, use_container_width=True)
 
-        # 2. 몬테카를로 시뮬레이션 (선택된 자산)
+        # 2. 몬테카를로 시뮬레이션
         if show_monte:
             with q_col2:
                 st.subheader("몬테카를로 시뮬레이션 (Future Price Path)")
                 target_asset = st.selectbox("시뮬레이션 대상 자산 선택", list(cryptos.keys()) + list(indices.keys()))
                 target_code = {**indices, **currencies, **cryptos}[target_asset]
                 
-                # 해당 자산 데이터 추출
                 if isinstance(batch_data.columns, pd.MultiIndex):
                     sim_data = batch_data[target_code]
                 else:
