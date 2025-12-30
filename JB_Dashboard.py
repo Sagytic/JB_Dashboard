@@ -67,8 +67,6 @@ def process_ticker_data(df, is_jpy=False):
     df = df.copy()
 
     # [수정] NaN 처리 강화: Close(종가)가 없는 행(휴장일 등)은 과감히 제거
-    # yfinance 배차 다운로드는 모든 종목의 인덱스를 합치기 때문에 
-    # 특정 종목이 거래되지 않은 날은 NaN으로 들어옵니다. 이를 제거해야 합니다.
     df = df.dropna(subset=['Close'])
 
     if df.empty:
@@ -140,7 +138,8 @@ def draw_mini_chart(df, ticker_id, is_flat=False, color_up="#2ecc71", color_down
     return fig
 
 # --- 카드 생성 함수 (Batch Data 사용) ---
-def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}", reference_text="기준: 전일 종가"):
+# [수정] show_chart 파라미터 추가
+def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}", reference_text="기준: 전일 종가", show_chart=True):
     with st.container(border=True):
         # 전체 데이터셋에서 내 티커에 해당하는 데이터만 쏙 뽑아냄
         ticker_df = pd.DataFrame()
@@ -166,46 +165,50 @@ def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}
             delta=fmt.format(delta),
             delta_color="normal" 
         )
-        # [요청사항] 기준 시점 표시 (파라미터로 변경 가능)
         st.caption(reference_text)
         
-        if not df.empty:
-            fig = draw_mini_chart(df, ticker_id=ticker, is_flat=is_flat)
-            st.plotly_chart(
-                fig, 
-                use_container_width=True, 
-                config={
-                    'displayModeBar': True,
-                    'displaylogo': False,
-                    'modeBarButtonsToRemove': ['select2d', 'lasso2d'],
-                }
-            )
-        else:
-            st.warning("데이터 로드 실패")
+        # [수정] 차트 표시 여부에 따라 조건부 렌더링
+        if show_chart:
+            if not df.empty:
+                fig = draw_mini_chart(df, ticker_id=ticker, is_flat=is_flat)
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    config={
+                        'displayModeBar': True,
+                        'displaylogo': False,
+                        'modeBarButtonsToRemove': ['select2d', 'lasso2d'],
+                    }
+                )
+            else:
+                st.warning("데이터 로드 실패")
 
 # --- 메인 앱 로직 ---
 def main():
-    # 1. 상단 레이아웃
-    col_title, col_empty, col_toggle, col_btn = st.columns([5, 1, 3, 2])
+    # 1. 상단 레이아웃 [제목] [간편모드] [자동새로고침] [새로고침버튼]
+    col_title, col_simple, col_toggle, col_btn = st.columns([4, 2, 3, 1])
     
     with col_title:
         st.title("Global Financial Dashboard")
+    
+    # [추가] 간편 모드 토글
+    with col_simple:
+        st.write("")
+        simple_mode = st.toggle("간편 모드 (차트 숨기기)", value=False)
         
     with col_toggle:
         st.write("") 
-        # [요청사항] 텍스트 변경
         auto_refresh = st.toggle("10초 단위 자동 새로고침", value=False)
         
     with col_btn:
         st.write("") 
-        # [요청사항] 버튼 텍스트 추가
         if st.button("🔄 즉시 새로고침", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
     status_placeholder = st.empty()
 
-    # --- 데이터 정의 및 일괄 로드 (Batch Download) ---
+    # --- 데이터 정의 및 일괄 로드 ---
     indices = {
         "KOSPI": "^KS11", "KOSDAQ": "^KQ11", 
         "NASDAQ": "^IXIC", "Dollar Index": "DX-Y.NYB"
@@ -218,37 +221,38 @@ def main():
         "Bitcoin": "BTC-KRW", "Ethereum": "ETH-KRW"
     }
     
-    # 모든 티커를 리스트로 합침
     all_tickers = list(indices.values()) + list(currencies.values()) + list(cryptos.values())
     
-    # [성능 핵심] 여기서 한 번에 다 받아옴
     with st.spinner('데이터를 불러오는 중...'):
         batch_data = get_batch_data(all_tickers)
+
+    # 간편 모드 여부에 따라 차트 표시 결정 (간편 모드 ON -> 차트 OFF)
+    show_charts = not simple_mode
 
     # 2. Market Indices
     st.subheader("Market Indices")
     idx_col1, idx_col2, idx_col3, idx_col4 = st.columns(4)
-    with idx_col1: create_card("KOSPI", "Index", indices["KOSPI"], batch_data)
-    with idx_col2: create_card("KOSDAQ", "Index", indices["KOSDAQ"], batch_data)
-    with idx_col3: create_card("NASDAQ", "Index", indices["NASDAQ"], batch_data)
-    with idx_col4: create_card("Dollar Index", "Index", indices["Dollar Index"], batch_data)
+    # [수정] show_chart 인자 전달
+    with idx_col1: create_card("KOSPI", "Index", indices["KOSPI"], batch_data, show_chart=show_charts)
+    with idx_col2: create_card("KOSDAQ", "Index", indices["KOSDAQ"], batch_data, show_chart=show_charts)
+    with idx_col3: create_card("NASDAQ", "Index", indices["NASDAQ"], batch_data, show_chart=show_charts)
+    with idx_col4: create_card("Dollar Index", "Index", indices["Dollar Index"], batch_data, show_chart=show_charts)
 
     # 3. Currencies
     st.divider()
     st.subheader("Exchange Rates (KRW)")
     curr_col1, curr_col2, curr_col3, curr_col4 = st.columns(4)
-    with curr_col1: create_card("USD/KRW", "1 USD", currencies["USD/KRW"], batch_data)
-    with curr_col2: create_card("JPY/KRW", "100 JPY", currencies["JPY/KRW"], batch_data, is_jpy=True)
-    with curr_col3: create_card("EUR/KRW", "1 EUR", currencies["EUR/KRW"], batch_data)
-    with curr_col4: create_card("CNY/KRW", "1 CNY", currencies["CNY/KRW"], batch_data)
+    with curr_col1: create_card("USD/KRW", "1 USD", currencies["USD/KRW"], batch_data, show_chart=show_charts)
+    with curr_col2: create_card("JPY/KRW", "100 JPY", currencies["JPY/KRW"], batch_data, is_jpy=True, show_chart=show_charts)
+    with curr_col3: create_card("EUR/KRW", "1 EUR", currencies["EUR/KRW"], batch_data, show_chart=show_charts)
+    with curr_col4: create_card("CNY/KRW", "1 CNY", currencies["CNY/KRW"], batch_data, show_chart=show_charts)
 
     # 4. Crypto
     st.divider()
     st.subheader("Crypto Assets (KRW)")
     cry_col1, cry_col2 = st.columns(2)
-    # [수정] 코인용 기준 텍스트 전달
-    with cry_col1: create_card("Bitcoin", "BTC/KRW", cryptos["Bitcoin"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)")
-    with cry_col2: create_card("Ethereum", "ETH/KRW", cryptos["Ethereum"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)")
+    with cry_col1: create_card("Bitcoin", "BTC/KRW", cryptos["Bitcoin"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts)
+    with cry_col2: create_card("Ethereum", "ETH/KRW", cryptos["Ethereum"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts)
 
     # --- 자동 새로고침 로직 ---
     if auto_refresh:
