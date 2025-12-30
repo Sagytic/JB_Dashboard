@@ -1,13 +1,15 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+import plotly.express as px
 import pandas as pd
-from datetime import datetime
+import numpy as np # [추가] 수치 해석 및 시뮬레이션용
+from datetime import datetime, timedelta
 import time
 
 # --- 페이지 설정 ---
 st.set_page_config(
-    page_title="Financial Dashboard",
+    page_title="JB Dashboard",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -27,21 +29,27 @@ st.markdown("""
             font-size: 20px;
             font-weight: bold;
         }
-        /* 캡션(기준 텍스트) 스타일 */
         [data-testid="stCaptionContainer"] {
             font-size: 12px;
             color: #666;
             margin-top: -10px;
             margin-bottom: 10px;
         }
-        /* 차트 모드바 스타일링 */
         .modebar-btn {
             color: #b0b0b0 !important;
         }
-        /* 버튼 스타일 조정 */
         div.stButton > button {
             padding: 0.2rem 0.5rem;
             font-size: 0.8rem;
+        }
+        /* Quant Lab 스타일 */
+        .quant-header {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #fafafa; /* 흰색으로 변경 */
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid #444;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -50,29 +58,81 @@ st.markdown("""
 @st.cache_data(ttl=60)
 def get_batch_data(tickers):
     try:
-        # 여러 종목을 한 번에 다운로드 (group_by='ticker'로 종목별로 묶음)
-        # 이렇게 하면 네트워크 요청을 1번만 보내므로 속도가 훨씬 빠릅니다.
         data = yf.download(tickers, period="1y", interval="1d", group_by='ticker', progress=False)
         return data
     except Exception:
         return pd.DataFrame()
 
-# --- 데이터 전처리 함수 (단일 종목 처리) ---
+# --- [Technical] 기술적 지표 계산 함수 ---
+def add_technical_indicators(df):
+    if df.empty or len(df) < 20:
+        return df
+    
+    # 1. 이동평균선 (SMA 20)
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    
+    # 2. 볼린저 밴드 (Bollinger Bands)
+    # 표준편차
+    df['STD_20'] = df['Close'].rolling(window=20).std()
+    df['Upper_Band'] = df['SMA_20'] + (df['STD_20'] * 2)
+    df['Lower_Band'] = df['SMA_20'] - (df['STD_20'] * 2)
+    
+    # 3. RSI (Relative Strength Index)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    return df
+
+# --- [Quant] 몬테카를로 시뮬레이션 함수 ---
+def run_monte_carlo(df, simulations=50, days=30):
+    if df.empty:
+        return None
+    
+    # 로그 수익률 계산
+    log_returns = np.log(1 + df['Close'].pct_change())
+    
+    # 드리프트(Drift)와 변동성(Variance) 계산
+    u = log_returns.mean()
+    var = log_returns.var()
+    drift = u - (0.5 * var)
+    stdev = log_returns.std()
+    
+    # 예측 데이터 생성
+    last_price = df['Close'].iloc[-1]
+    prediction_dates = [df.index[-1] + timedelta(days=x) for x in range(1, days+1)]
+    
+    simulation_df = pd.DataFrame()
+    simulation_df['Date'] = prediction_dates
+    simulation_df.set_index('Date', inplace=True)
+    
+    # 난수 생성 및 시뮬레이션 반복
+    for i in range(simulations):
+        # 정규분포를 따르는 난수 Z 생성
+        Z = np.random.normal(0, 1, days)
+        daily_returns = np.exp(drift + stdev * Z)
+        
+        price_paths = [last_price]
+        for r in daily_returns:
+            price_paths.append(price_paths[-1] * r)
+        
+        simulation_df[f'Sim_{i}'] = price_paths[1:]
+        
+    return simulation_df
+
+# --- 데이터 전처리 함수 ---
 def process_ticker_data(df, is_jpy=False):
-    # df는 이미 특정 종목의 데이터프레임 (Open, High, Low, Close 컬럼 보유)
     if df.empty:
         return 0, 0, pd.DataFrame(), False
     
-    # 원본 보호를 위해 복사
     df = df.copy()
-
-    # [수정] NaN 처리 강화: Close(종가)가 없는 행(휴장일 등)은 과감히 제거
     df = df.dropna(subset=['Close'])
 
     if df.empty:
         return 0, 0, pd.DataFrame(), False
 
-    # 데이터 누락 방지 (NaN 채우기)
     cols_to_check = ['Open', 'High', 'Low']
     for col in cols_to_check:
         if col in df.columns:
@@ -89,39 +149,46 @@ def process_ticker_data(df, is_jpy=False):
     else:
         delta = 0
     
-    # [추가] 최종 값에도 NaN이 남아있을 경우 0으로 처리 (에러 방지)
     if pd.isna(current_price): current_price = 0.0
     if pd.isna(delta): delta = 0.0
 
-    # 데이터가 "납작한지" 확인 (선 차트 전환용)
     is_flat = (df['High'] == df['Low']).mean() > 0.5
         
     return current_price, delta, df, is_flat
 
-# --- 차트 그리기 함수 ---
-def draw_mini_chart(df, ticker_id, is_flat=False, color_up="#2ecc71", color_down="#ff4b4b"):
+# --- 차트 그리기 함수 (Advanced) ---
+def draw_chart(df, ticker_id, is_flat=False, show_tech=False):
     if df.empty:
         return go.Figure()
 
+    fig = go.Figure()
+
+    # 1. 기본 캔들/라인 차트
     if is_flat:
-        fig = go.Figure(data=[go.Scatter(
-            x=df.index,
-            y=df['Close'],
-            mode='lines',
-            line=dict(color='#3498db', width=2),
-            name='Close'
-        )])
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', 
+                                 line=dict(color='#3498db', width=2), name='Close'))
     else:
-        fig = go.Figure(data=[go.Candlestick(
-            x=df.index,
-            open=df['Open'],
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            increasing_line_color=color_up,
-            decreasing_line_color=color_down,
-            showlegend=False
-        )])
+        fig.add_trace(go.Candlestick(
+            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+            increasing_line_color="#2ecc71", decreasing_line_color="#ff4b4b", name='Price'
+        ))
+
+    # 2. [Technical] 기술적 지표 추가
+    if show_tech and 'SMA_20' in df.columns:
+        # 볼린저 밴드 (영역 채우기)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Upper_Band'], line=dict(color='rgba(255, 255, 255, 0)'),
+            showlegend=False, hoverinfo='skip'
+        ))
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Lower_Band'], fill='tonexty', 
+            fillcolor='rgba(108, 92, 231, 0.1)', line=dict(color='rgba(255, 255, 255, 0)'),
+            name='Bollinger Band', hoverinfo='skip'
+        ))
+        # SMA 20
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['SMA_20'], line=dict(color='#f1c40f', width=1), name='SMA 20'
+        ))
 
     fig.update_layout(
         template="plotly_dark",
@@ -133,32 +200,34 @@ def draw_mini_chart(df, ticker_id, is_flat=False, color_up="#2ecc71", color_down
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         dragmode='zoom',
-        uirevision=ticker_id 
+        uirevision=ticker_id,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
 
-# --- 카드 생성 함수 (Batch Data 사용) ---
-# [수정] show_chart 파라미터 추가
-def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}", reference_text="기준: 전일 종가", show_chart=True):
+# --- 카드 생성 함수 ---
+def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}", 
+                reference_text="기준: 전일 종가", show_chart=True, show_tech=False):
     with st.container(border=True):
-        # 전체 데이터셋에서 내 티커에 해당하는 데이터만 쏙 뽑아냄
         ticker_df = pd.DataFrame()
         try:
             if not batch_data.empty:
-                # yfinance 멀티인덱스 구조 처리
                 if isinstance(batch_data.columns, pd.MultiIndex):
                     try:
                         ticker_df = batch_data[ticker]
                     except KeyError:
-                        pass # 데이터에 해당 티커가 없음
+                        pass
                 else:
-                    # 티커가 1개뿐이거나 구조가 다를 경우 통째로 사용
                     ticker_df = batch_data
         except Exception:
             pass
 
         price, delta, df, is_flat = process_ticker_data(ticker_df, is_jpy)
         
+        # 기술적 지표 계산
+        if show_tech and not df.empty:
+            df = add_technical_indicators(df)
+
         st.metric(
             label=f"{title} ({sub_label})", 
             value=fmt.format(price), 
@@ -167,31 +236,22 @@ def create_card(title, sub_label, ticker, batch_data, is_jpy=False, fmt="{:,.2f}
         )
         st.caption(reference_text)
         
-        # [수정] 차트 표시 여부에 따라 조건부 렌더링
         if show_chart:
             if not df.empty:
-                fig = draw_mini_chart(df, ticker_id=ticker, is_flat=is_flat)
-                st.plotly_chart(
-                    fig, 
-                    use_container_width=True, 
-                    config={
-                        'displayModeBar': True,
-                        'displaylogo': False,
-                        'modeBarButtonsToRemove': ['select2d', 'lasso2d'],
-                    }
-                )
+                fig = draw_chart(df, ticker_id=ticker, is_flat=is_flat, show_tech=show_tech)
+                st.plotly_chart(fig, use_container_width=True, 
+                                config={'displayModeBar': True, 'displaylogo': False, 
+                                        'modeBarButtonsToRemove': ['select2d', 'lasso2d']})
             else:
                 st.warning("데이터 로드 실패")
 
 # --- 메인 앱 로직 ---
 def main():
-    # 1. 상단 레이아웃 [제목] [간편모드] [자동새로고침] [새로고침버튼]
     col_title, col_simple, col_toggle, col_btn = st.columns([4, 2, 3, 1])
     
     with col_title:
         st.title("Global Financial Dashboard")
     
-    # [추가] 간편 모드 토글
     with col_simple:
         st.write("")
         simple_mode = st.toggle("간편 모드 (차트 숨기기)", value=False)
@@ -202,62 +262,114 @@ def main():
         
     with col_btn:
         st.write("") 
-        if st.button("🔄 즉시 새로고침", use_container_width=True):
+        if st.button("즉시 새로고침", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
     status_placeholder = st.empty()
 
-    # --- 데이터 정의 및 일괄 로드 ---
-    indices = {
-        "KOSPI": "^KS11", "KOSDAQ": "^KQ11", 
-        "NASDAQ": "^IXIC", "Dollar Index": "DX-Y.NYB"
-    }
-    currencies = {
-        "USD/KRW": "KRW=X", "JPY/KRW": "JPYKRW=X",
-        "EUR/KRW": "EURKRW=X", "CNY/KRW": "CNYKRW=X"
-    }
-    cryptos = {
-        "Bitcoin": "BTC-KRW", "Ethereum": "ETH-KRW"
-    }
+    # --- 데이터 정의 ---
+    indices = {"KOSPI": "^KS11", "KOSDAQ": "^KQ11", "NASDAQ": "^IXIC", "Dollar Index": "DX-Y.NYB"}
+    currencies = {"USD/KRW": "KRW=X", "JPY/KRW": "JPYKRW=X", "EUR/KRW": "EURKRW=X", "CNY/KRW": "CNYKRW=X"}
+    cryptos = {"Bitcoin": "BTC-KRW", "Ethereum": "ETH-KRW"}
     
     all_tickers = list(indices.values()) + list(currencies.values()) + list(cryptos.values())
     
-    with st.spinner('데이터를 불러오는 중...'):
+    with st.spinner('데이터 분석 및 로딩 중...'):
         batch_data = get_batch_data(all_tickers)
 
-    # 간편 모드 여부에 따라 차트 표시 결정 (간편 모드 ON -> 차트 OFF)
     show_charts = not simple_mode
 
-    # 2. Market Indices
+    # [Quant 옵션] 사이드바 설정 - 모든 옵션 True로 설정
+    st.sidebar.header("Quant Lab Settings")
+    show_tech = st.sidebar.checkbox("기술적 지표 (Bollinger/SMA)", value=True, help="차트에 볼린저 밴드와 이동평균선을 오버레이합니다.")
+    show_heatmap = st.sidebar.checkbox("자산 상관관계 (Heatmap)", value=True, help="자산 간의 가격 움직임 상관계수를 분석합니다.")
+    show_monte = st.sidebar.checkbox("몬테카를로 시뮬레이션", value=True, help="향후 30일간의 가격 변동 확률을 시뮬레이션합니다.")
+
+    # 1, 2, 3 섹션 (기존 카드 뷰)
     st.subheader("Market Indices")
     idx_col1, idx_col2, idx_col3, idx_col4 = st.columns(4)
-    # [수정] show_chart 인자 전달
-    with idx_col1: create_card("KOSPI", "Index", indices["KOSPI"], batch_data, show_chart=show_charts)
-    with idx_col2: create_card("KOSDAQ", "Index", indices["KOSDAQ"], batch_data, show_chart=show_charts)
-    with idx_col3: create_card("NASDAQ", "Index", indices["NASDAQ"], batch_data, show_chart=show_charts)
-    with idx_col4: create_card("Dollar Index", "Index", indices["Dollar Index"], batch_data, show_chart=show_charts)
+    with idx_col1: create_card("KOSPI", "Index", indices["KOSPI"], batch_data, show_chart=show_charts, show_tech=show_tech)
+    with idx_col2: create_card("KOSDAQ", "Index", indices["KOSDAQ"], batch_data, show_chart=show_charts, show_tech=show_tech)
+    with idx_col3: create_card("NASDAQ", "Index", indices["NASDAQ"], batch_data, show_chart=show_charts, show_tech=show_tech)
+    with idx_col4: create_card("Dollar Index", "Index", indices["Dollar Index"], batch_data, show_chart=show_charts, show_tech=show_tech)
 
-    # 3. Currencies
     st.divider()
     st.subheader("Exchange Rates (KRW)")
     curr_col1, curr_col2, curr_col3, curr_col4 = st.columns(4)
-    with curr_col1: create_card("USD/KRW", "1 USD", currencies["USD/KRW"], batch_data, show_chart=show_charts)
-    with curr_col2: create_card("JPY/KRW", "100 JPY", currencies["JPY/KRW"], batch_data, is_jpy=True, show_chart=show_charts)
-    with curr_col3: create_card("EUR/KRW", "1 EUR", currencies["EUR/KRW"], batch_data, show_chart=show_charts)
-    with curr_col4: create_card("CNY/KRW", "1 CNY", currencies["CNY/KRW"], batch_data, show_chart=show_charts)
+    with curr_col1: create_card("USD/KRW", "1 USD", currencies["USD/KRW"], batch_data, show_chart=show_charts, show_tech=show_tech)
+    with curr_col2: create_card("JPY/KRW", "100 JPY", currencies["JPY/KRW"], batch_data, is_jpy=True, show_chart=show_charts, show_tech=show_tech)
+    with curr_col3: create_card("EUR/KRW", "1 EUR", currencies["EUR/KRW"], batch_data, show_chart=show_charts, show_tech=show_tech)
+    with curr_col4: create_card("CNY/KRW", "1 CNY", currencies["CNY/KRW"], batch_data, show_chart=show_charts, show_tech=show_tech)
 
-    # 4. Crypto
     st.divider()
     st.subheader("Crypto Assets (KRW)")
     cry_col1, cry_col2 = st.columns(2)
-    with cry_col1: create_card("Bitcoin", "BTC/KRW", cryptos["Bitcoin"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts)
-    with cry_col2: create_card("Ethereum", "ETH/KRW", cryptos["Ethereum"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts)
+    with cry_col1: create_card("Bitcoin", "BTC/KRW", cryptos["Bitcoin"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts, show_tech=show_tech)
+    with cry_col2: create_card("Ethereum", "ETH/KRW", cryptos["Ethereum"], batch_data, fmt="{:,.0f}", reference_text="기준: 전일 종가 (UTC 0시)", show_chart=show_charts, show_tech=show_tech)
 
-    # --- 자동 새로고침 로직 ---
+    # --- [Quant Lab] 고급 분석 섹션 ---
+    if not simple_mode and (show_heatmap or show_monte):
+        st.markdown("<div class='quant-header'>Quant Lab (Advanced Analysis)</div>", unsafe_allow_html=True)
+        
+        # 데이터프레임 재구조화 (Pivot for Correlation)
+        close_df = pd.DataFrame()
+        for t_name, t_code in {**indices, **currencies, **cryptos}.items():
+            try:
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    series = batch_data[t_code]['Close']
+                else:
+                    series = batch_data['Close'] # 단일 티커일 경우
+                close_df[t_name] = series
+            except:
+                pass
+        
+        # 결측치 보간 (상관분석을 위해)
+        close_df = close_df.fillna(method='ffill').fillna(method='bfill')
+
+        q_col1, q_col2 = st.columns([1, 1])
+
+        # 1. 상관관계 히트맵
+        if show_heatmap:
+            with q_col1:
+                st.subheader("자산 간 상관관계 히트맵 (Correlation Matrix)")
+                corr_matrix = close_df.corr()
+                fig_corr = px.imshow(corr_matrix, text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
+                fig_corr.update_layout(template="plotly_dark", height=400)
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+        # 2. 몬테카를로 시뮬레이션 (선택된 자산)
+        if show_monte:
+            with q_col2:
+                st.subheader("몬테카를로 시뮬레이션 (Future Price Path)")
+                target_asset = st.selectbox("시뮬레이션 대상 자산 선택", list(cryptos.keys()) + list(indices.keys()))
+                target_code = {**indices, **currencies, **cryptos}[target_asset]
+                
+                # 해당 자산 데이터 추출
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    sim_data = batch_data[target_code]
+                else:
+                    sim_data = batch_data
+                
+                sim_res = run_monte_carlo(sim_data)
+                
+                if sim_res is not None:
+                    fig_sim = go.Figure()
+                    for c in sim_res.columns:
+                        fig_sim.add_trace(go.Scatter(x=sim_res.index, y=sim_res[c], mode='lines', 
+                                                     line=dict(width=1, color='rgba(100, 200, 255, 0.3)'), showlegend=False))
+                    
+                    fig_sim.update_layout(
+                        title=f"{target_asset}: 향후 30일 시나리오 (50회 반복)",
+                        template="plotly_dark", height=350,
+                        yaxis_title="Price Forecast"
+                    )
+                    st.plotly_chart(fig_sim, use_container_width=True)
+
+    # --- 자동 새로고침 ---
     if auto_refresh:
         for i in range(10, 0, -1):
-            status_placeholder.caption(f"⏳ {i}초 후 업데이트...")
+            status_placeholder.caption(f"{i}초 후 업데이트...")
             time.sleep(1)
         st.cache_data.clear()
         st.rerun()
